@@ -1,0 +1,89 @@
+services:
+  redis-primary:
+    image: redis:7-alpine
+    ports:
+      - "6390:6379"
+    command: >
+      redis-server
+      --requirepass devlab123
+      --maxmemory 100mb
+      --maxmemory-policy allkeys-lru
+      --appendonly yes
+      --save 60 1
+
+  redis-replica-1:
+    image: redis:7-alpine
+    ports:
+      - "6391:6379"
+    command: >
+      redis-server
+      --requirepass devlab123
+      --masterauth devlab123
+      --replicaof redis-primary 6379
+      --maxmemory 100mb
+      --maxmemory-policy allkeys-lru
+    depends_on:
+      - redis-primary
+
+  redis-replica-2:
+    image: redis:7-alpine
+    ports:
+      - "6392:6379"
+    command: >
+      redis-server
+      --requirepass devlab123
+      --masterauth devlab123
+      --replicaof redis-primary 6379
+      --maxmemory 100mb
+      --maxmemory-policy allkeys-lru
+    depends_on:
+      - redis-primary
+
+  sentinel-1:
+    image: redis:7-alpine
+    ports:
+      - "26379:26379"
+    volumes:
+      - ./infra/sentinel.conf.template:/etc/redis/sentinel-template.conf:ro
+    command: sh -c "until getent hosts redis-primary; do sleep 1; done; cp /etc/redis/sentinel-template.conf /tmp/sentinel.conf && redis-sentinel /tmp/sentinel.conf"
+    depends_on:
+      - redis-primary
+
+  sentinel-2:
+    image: redis:7-alpine
+    ports:
+      - "26380:26379"
+    volumes:
+      - ./infra/sentinel.conf.template:/etc/redis/sentinel-template.conf:ro
+    command: sh -c "until getent hosts redis-primary; do sleep 1; done; cp /etc/redis/sentinel-template.conf /tmp/sentinel.conf && redis-sentinel /tmp/sentinel.conf"
+    depends_on:
+      - redis-primary
+
+  sentinel-3:
+    image: redis:7-alpine
+    ports:
+      - "26381:26379"
+    volumes:
+      - ./infra/sentinel.conf.template:/etc/redis/sentinel-template.conf:ro
+    command: sh -c "until getent hosts redis-primary; do sleep 1; done; cp /etc/redis/sentinel-template.conf /tmp/sentinel.conf && redis-sentinel /tmp/sentinel.conf"
+    depends_on:
+      - redis-primary
+
+  # Sentinel's discovered addresses (redis-primary, redis-replica-1, ...)
+  # only resolve inside this compose network -- on Docker Desktop for Mac,
+  # the host machine cannot route to container-internal bridge IPs at all,
+  # so a client running directly on the host can never use Sentinel
+  # discovery against this stack. This runner joins the same network a
+  # real containerized application would, and is how this repo's tests
+  # and scripts actually execute -- see docs/TROUBLESHOOTING.md.
+  test-runner:
+    image: python:3.12-slim
+    volumes:
+      - .:/app
+    working_dir: /app
+    command: ["sleep", "infinity"]
+    depends_on:
+      - redis-primary
+      - sentinel-1
+      - sentinel-2
+      - sentinel-3

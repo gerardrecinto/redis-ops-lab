@@ -1,0 +1,48 @@
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["site/**", "tests/**", "redis_ops_lab/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Assemble site
+        run: |
+          mkdir -p _site
+          cp site/index.html _site/
+          python3 - tests _site/tests.json <<'PY'
+          import ast, glob, json, os, sys
+          src, out = sys.argv[1], sys.argv[2]
+          tests = []
+          for f in sorted(glob.glob(os.path.join(src, "test_*.py"))):
+              mod = os.path.basename(f)[5:-3]
+              for node in ast.parse(open(f).read()).body:
+                  if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+                      tests.append({"file": mod, "name": node.name, "doc": (ast.get_docstring(node) or "").split("\n\n")[0].replace("\n", " ")[:220]})
+          json.dump(tests, open(out, "w"), indent=1)
+          print(len(tests), "tests")
+          PY
+          touch _site/.nojekyll
+      - uses: actions/upload-pages-artifact@v5
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v5

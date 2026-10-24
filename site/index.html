@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>redis-ops-lab: Sentinel failover and fencing locks</title>
+<meta name="description" content="Replay a real Redis Sentinel failover, model the lock race that fencing tokens prevent, and try a sliding-window rate limiter. A lab with live-stack tests.">
+<meta property="og:title" content="redis-ops-lab">
+<meta property="og:description" content="Replay a real Redis Sentinel failover, model the lock race that fencing tokens prevent, and try a sliding-window rate limiter. A lab with live-stack tests.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='7' fill='%23ef4444'/%3E%3Ccircle cx='16' cy='16' r='6' fill='none' stroke='%23fff' stroke-width='3'/%3E%3C/svg%3E">
+<style>
+
+:root{--bg:#f8fafc;--panel:#fff;--panel2:#f1f5f9;--line:#e2e8f0;--fg:#0f172a;--mute:#475569;--brand:#b91c1c;--brand-bg:#fee2e2;--ok:#047857;--ok-bg:#d1fae5;--err:#b91c1c;--err-bg:#fee2e2;--code:#0b1220;--code-fg:#e2e8f0}
+@media (prefers-color-scheme:dark){:root:not([data-theme=light]){--bg:#070d1a;--panel:#0d1526;--panel2:#111c33;--line:#1e2b47;--fg:#e8eefc;--mute:#9fb0cc;--brand:#f87171;--brand-bg:#3b1212;--ok:#34d399;--ok-bg:#06382b;--err:#fca5a5;--err-bg:#3b1212}}
+:root[data-theme=dark]{--bg:#070d1a;--panel:#0d1526;--panel2:#111c33;--line:#1e2b47;--fg:#e8eefc;--mute:#9fb0cc;--brand:#f87171;--brand-bg:#3b1212;--ok:#34d399;--ok-bg:#06382b;--err:#fca5a5;--err-bg:#3b1212}
+*{box-sizing:border-box}
+html{scroll-behavior:smooth}
+body{margin:0;background:var(--bg);color:var(--fg);font:16px/1.6 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;-webkit-font-smoothing:antialiased}
+a{color:var(--brand)}
+code,pre,textarea,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+.wrap{max-width:1080px;margin:0 auto;padding:0 16px}
+nav{position:sticky;top:0;z-index:5;background:color-mix(in srgb,var(--bg) 88%,transparent);backdrop-filter:blur(10px);border-bottom:1px solid var(--line)}
+nav .wrap{display:flex;align-items:center;justify-content:space-between;height:56px;gap:12px}
+.logo{display:flex;align-items:center;gap:10px;font-weight:700;color:var(--fg);text-decoration:none}
+.logo i{width:22px;height:22px;border-radius:6px;background:#ef4444;display:inline-block}
+nav .links{display:flex;gap:18px;align-items:center;font-size:14px}
+nav .links a{color:var(--mute);text-decoration:none}
+nav .links a:hover{color:var(--fg)}
+.btn{display:inline-flex;align-items:center;gap:8px;padding:10px 18px;border-radius:10px;font-weight:600;text-decoration:none;border:1px solid var(--line);color:var(--fg);background:var(--panel);cursor:pointer;font-size:15px}
+.btn.primary{background:#ef4444;border-color:#ef4444;color:#2b0505}
+.btn.primary:hover{background:#f87171}
+.btn:focus-visible,textarea:focus-visible,button:focus-visible,a:focus-visible{outline:2px solid #ef4444;outline-offset:2px}
+.hero{padding:72px 0 40px;text-align:center}
+.pill{display:inline-block;font-size:13px;color:var(--brand);background:var(--brand-bg);padding:4px 12px;border-radius:99px;margin-bottom:20px;font-weight:600}
+h1{font-size:clamp(34px,6vw,58px);line-height:1.08;margin:0 0 18px;letter-spacing:-.02em}
+h1 em{font-style:normal;color:var(--brand)}
+.lede{max-width:700px;margin:0 auto 28px;color:var(--mute);font-size:18px}
+.cta{display:flex;gap:12px;justify-content:center;flex-wrap:wrap}
+.stats{display:flex;gap:28px;justify-content:center;flex-wrap:wrap;margin-top:36px;color:var(--mute);font-size:14px}
+.stats b{display:block;color:var(--fg);font-size:22px}
+section{padding:56px 0}
+h2{font-size:clamp(26px,4vw,36px);margin:0 0 8px;letter-spacing:-.01em}
+.sub{color:var(--mute);margin:0 0 28px;max-width:720px}
+.lab{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+@media (max-width:860px){.lab{grid-template-columns:minmax(0,1fr)}nav .links .hide-s{display:none}}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow:hidden;min-width:0}
+.card h3{margin:0;padding:12px 16px;font-size:13px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);border-bottom:1px solid var(--line);display:flex;justify-content:space-between;align-items:center;gap:8px;flex-wrap:wrap}
+.tools{display:flex;gap:6px;flex-wrap:wrap}
+.chip{font:600 12px system-ui;padding:5px 10px;border-radius:8px;border:1px solid var(--line);background:var(--panel2);color:var(--fg);cursor:pointer;text-transform:none;letter-spacing:0}
+.chip[aria-pressed=true]{background:var(--brand-bg);border-color:var(--brand);color:var(--brand)}
+#log{display:block;width:100%;height:420px;border:0;padding:12px 14px;font-size:12.5px;line-height:1.55;background:var(--code);color:var(--code-fg);resize:vertical;white-space:pre;overflow:auto}
+.src{display:flex;gap:8px;align-items:center;padding:10px 14px;border-top:1px solid var(--line);font-size:13px;color:var(--mute);flex-wrap:wrap}
+.out{min-height:420px}
+.status{padding:16px;color:var(--mute);font-size:14px}
+.verdict{padding:18px 16px;border-bottom:1px solid var(--line);background:var(--err-bg)}
+.verdict.unknown{background:var(--panel2)}
+.verdict b{display:block;font-size:20px;text-transform:uppercase;letter-spacing:.04em;color:var(--err)}
+.verdict.unknown b{color:var(--mute)}
+.verdict span{font-size:14px;color:var(--mute)}
+.sec{padding:14px 16px;border-bottom:1px solid var(--line)}
+.sec:last-child{border-bottom:0}
+.sec h4{margin:0 0 8px;font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute)}
+.bar{height:10px;border-radius:99px;background:var(--panel2);overflow:hidden;max-width:260px;display:inline-block;vertical-align:middle;margin-right:10px;width:60%}
+.bar i{display:block;height:100%;background:#ef4444}
+.site{padding:8px 0;border-bottom:1px dashed var(--line);font-size:13.5px}
+.site:last-child{border:0}
+.site code{background:var(--panel2);padding:1px 6px;border-radius:5px;font-size:12px}
+.fix{background:var(--ok-bg);color:var(--ok);padding:10px 12px;border-radius:8px;font-size:14px}
+.note{font-size:13px;color:var(--mute);margin-top:12px}
+.steps{display:grid;grid-template-columns:repeat(3,1fr);gap:16px}
+@media (max-width:860px){.steps{grid-template-columns:minmax(0,1fr)}}
+.step{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:20px}
+.step .n{width:28px;height:28px;border-radius:8px;background:var(--brand-bg);color:var(--brand);display:grid;place-items:center;font-weight:700;margin-bottom:10px}
+.step h3{margin:0 0 6px;font-size:17px}
+.step p{margin:0;color:var(--mute);font-size:15px}
+.tw{background:var(--panel);border:1px solid var(--line);border-radius:14px;overflow-x:auto;max-width:100%}
+table{width:100%;min-width:560px;border-collapse:collapse;font-size:14px}
+th,td{text-align:left;padding:12px 14px;border-bottom:1px solid var(--line);vertical-align:top}
+th{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--mute);background:var(--panel2)}
+tr:last-child td{border-bottom:0}
+td:first-child{font-family:ui-monospace,monospace;font-weight:700;white-space:nowrap}
+.install pre{background:var(--code);color:var(--code-fg);padding:16px;border-radius:12px;overflow-x:auto;font-size:13.5px;margin:0 0 12px}
+.cols2{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
+@media (max-width:860px){.cols2{grid-template-columns:minmax(0,1fr)}}
+.limits{background:var(--panel);border:1px solid var(--line);border-left:4px solid #f59e0b;border-radius:10px;padding:16px 20px}
+.limits ul{margin:8px 0 0;padding-left:20px;color:var(--mute)}
+footer{border-top:1px solid var(--line);padding:32px 0;color:var(--mute);font-size:14px}
+footer .wrap{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}
+.sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0)}
+
+.inc{background:var(--panel);border:1px solid var(--line);border-left:4px solid var(--brand);border-radius:12px;padding:16px 18px;min-width:0}
+.inc h3{margin:0 0 6px;font-size:16px}
+.inc p{margin:0 0 8px;color:var(--mute);font-size:14.5px}
+.inc pre{margin:8px 0 0;background:var(--code);color:var(--code-fg);padding:10px 12px;border-radius:8px;font-size:12px;overflow-x:auto}
+.incs{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px}
+pre.term{margin:0;background:var(--code);color:var(--code-fg);padding:14px 16px;font-size:12.5px;line-height:1.55;overflow-x:auto;white-space:pre}
+.term .hl{color:#fbbf24}
+.term .ok{color:#34d399}
+.term .bad{color:#f87171}
+.term .dim{color:#64748b}
+.player{display:flex;gap:8px;flex-wrap:wrap;padding:12px 14px;border-top:1px solid var(--line);align-items:center}
+.cap{font-size:13px;color:var(--mute);padding:10px 16px;border-top:1px solid var(--line);min-height:44px}
+.sim{display:inline-block;font:700 11px ui-monospace,monospace;color:var(--brand);background:var(--brand-bg);padding:2px 8px;border-radius:6px}
+.real{display:inline-block;font:700 11px ui-monospace,monospace;color:var(--ok);background:var(--ok-bg);padding:2px 8px;border-radius:6px}
+.note code,.sub code,.cap code{overflow-wrap:anywhere}
+.tcat{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:8px;padding:14px}
+.tcat div{border:1px solid var(--line);border-radius:10px;padding:8px 10px;font-size:13px;background:var(--panel2);min-width:0}
+.tcat b{font-family:ui-monospace,monospace;font-size:12px;word-break:break-all;display:block}
+.tcat span{color:var(--mute)}
+.ctrl{display:flex;gap:10px;align-items:center;flex-wrap:wrap;padding:12px 14px;border-top:1px solid var(--line)}
+.ctrl label{font-size:13px;color:var(--mute)}
+.ctrl select,.ctrl input[type=number],.ctrl input[type=text]{background:var(--panel2);color:var(--fg);border:1px solid var(--line);border-radius:8px;padding:6px 8px;font-size:13px}
+.ctrl input[type=number]{width:72px}
+.bars{padding:14px 16px;display:grid;gap:6px}
+.bar{display:grid;grid-template-columns:90px 1fr 56px;gap:8px;align-items:center;font:12px ui-monospace,monospace}
+.bar i{display:block;height:14px;border-radius:4px;background:var(--brand);min-width:2px}
+.bar i.zero{background:var(--err);opacity:.35;width:100%}
+.ta{display:block;width:100%;border:0;padding:12px 14px;font-size:12.5px;line-height:1.55;background:var(--code);color:var(--code-fg);resize:vertical;white-space:pre;overflow:auto;font-family:ui-monospace,monospace;height:150px}
+.lbl{display:block;padding:8px 14px;font-size:12px;color:var(--mute);background:var(--panel2);border-bottom:1px solid var(--line);border-top:1px solid var(--line)}
+</style>
+</head>
+<body>
+<nav><div class="wrap">
+  <a class="logo" href="#top"><i></i>redis-ops-lab</a>
+  <div class="links"><a href="#try" class="hide-s">Try it</a><a href="#install" class="hide-s">Install</a><a class="btn" href="https://github.com/gerardrecinto/redis-ops-lab">GitHub</a></div>
+</div></nav>
+
+<header class="hero" id="top"><div class="wrap">
+  <h1>The lock expired. <em>Worker A did not notice.</em></h1>
+  <p class="lede">A Redis operations lab: a primary, two replicas and three Sentinels, an executed automated failover, cache-aside with TTL jitter, hot-key splitting, a Lua-atomic rate limiter and a lock with fencing tokens. Tested against the live stack.</p>
+  <div class="cta"><a class="btn primary" href="#try">Replay the race</a><a class="btn" href="#install">Run the lab</a></div>
+  <div class="stats"><div><b>3</b>Sentinels, quorum 2</div><div><b>1</b>failover, actually executed</div><div><b>0</b>Redis servers on this page</div></div>
+</div></header>
+
+
+<section id="try"><div class="wrap">
+  <h2>The lock race that a TTL cannot prevent</h2>
+  <p class="sub">Worker A takes a lock, stalls past its TTL, and wakes up still believing it owns it. Worker B legitimately took the lock in between. Replay it with and without a fencing token. <span class="sim">SIMULATED MODEL</span> This page models the rules in <code>lock/distributed_lock.py</code> and <code>lock/protected_resource.py</code>. It does not run Redis. The repo's own test reproduces the race against a live Redis.</p>
+  <div class="lab">
+    <div class="card"><h3><span>Timeline</span></h3>
+      <div class="ctrl">
+        <label for="ttl">lock TTL (ms)</label><input id="ttl" type="number" value="200" min="50" max="5000">
+        <label for="pause">A stalls for (ms)</label><input id="pause" type="number" value="300" min="0" max="10000">
+        <label><input type="checkbox" id="fence" checked> fencing token enforced by the resource</label>
+      </div>
+      <pre class="term" id="lock" aria-live="polite"></pre>
+    </div>
+    <div class="card"><h3><span>Sliding-window limiter</span></h3>
+      <div class="ctrl">
+        <label for="lim">limit</label><input id="lim" type="number" value="3" min="1" max="20">
+        <label for="win">window (s)</label><input id="win" type="number" value="10" min="1" max="60">
+        <button class="btn primary" id="req" type="button">Send request</button>
+        <button class="btn" id="tick" type="button">Advance 3s</button>
+        <button class="btn" id="rst" type="button">Reset</button>
+      </div>
+      <pre class="term" id="rl" aria-live="polite"></pre>
+    </div>
+  </div>
+  <p class="note">The limiter model follows the Lua script in <code>ratelimit/sliding_window.py</code>: drop entries older than the window, count, add if under the limit, all in one step. In the repo that atomicity comes from Redis running the script as a single operation.</p>
+</div></section>
+
+<section><div class="wrap">
+  <h2>A real failover, step by step</h2>
+  <p class="sub">This is the output captured in the repo README from <code>scripts/failover_demo.py</code>, which stops the primary container on a local Docker stack. It is replayed here, not re-run.</p>
+  <div class="card">
+    <pre class="term" id="fo" aria-live="polite"></pre>
+    <div class="player"><button class="btn" id="fprev" type="button">Back</button><button class="btn primary" id="fnext" type="button">Next step</button><button class="btn" id="fall" type="button">Show all</button></div>
+    <div class="cap" id="fcap"></div>
+  </div>
+</div></section>
+
+<section><div class="wrap">
+  <h2>Topology</h2>
+  <div class="card"><pre class="term">redis-primary   requirepass, AOF, maxmemory 100mb, allkeys-lru
+  +-- redis-replica-1   replicaof primary, read-only
+  +-- redis-replica-2   replicaof primary, read-only
+
+sentinel-1, sentinel-2, sentinel-3   quorum 2
+  watch the primary, promote a replica on failure
+
+test-runner   python:3.12-slim on the same Docker network</pre></div>
+  <p class="note">All three Sentinels share one Docker host, so they share one failure domain. The repo's tiers doc says plainly that this shows Redis and Sentinel mechanics, not the operations of independently failing machines.</p>
+</div></section>
+
+<section><div class="wrap">
+  <h2>Two real incidents</h2>
+  <div class="incs">
+    <div class="inc"><h3>Sentinel addresses do not resolve from the host</h3><p>On Docker Desktop for Mac the host cannot route to container bridge IPs, so a client asking Sentinel for the primary got an address it could not reach. Fix: run tests and scripts from a container on the same Docker network, which is also closer to production.</p></div>
+    <div class="inc"><h3>Sentinel started before DNS could resolve the primary</h3><p><code>depends_on</code> waits for a container to start, not for its hostname to resolve.</p><pre>Failed to resolve hostname 'redis-primary'
+*** FATAL CONFIG FILE ERROR ***</pre><p style="margin-top:8px">Fix: <code>sentinel resolve-hostnames yes</code> plus a retry loop before each Sentinel launches.</p></div>
+  </div>
+</div></section>
+
+<section><div class="wrap">
+  <h2>Tests <span id="tcount" class="cnt"></span></h2>
+  <p class="sub">Read from the repo's test files on every deploy. They run against the live stack.</p>
+  <div class="card"><div class="tcat" id="tcat"><div>Loading...</div></div></div>
+</div></section>
+
+<section id="install" class="install"><div class="wrap">
+  <h2>Run it yourself</h2>
+  <p class="sub">Docker and Python 3.12.</p>
+  <div class="cols2">
+    <div>
+<pre>docker compose up -d
+docker exec redis-ops-lab-test-runner-1 \
+  pip install -q -r /app/requirements.txt
+docker exec redis-ops-lab-test-runner-1 \
+  pip install -q -e /app</pre>
+    </div>
+    <div>
+<pre>docker exec redis-ops-lab-test-runner-1 \
+  python -m pytest tests/ -v
+python scripts/failover_demo.py   # on the host</pre>
+    </div>
+  </div>
+</div></section>
+
+<section><div class="wrap">
+  <div class="limits"><strong>What this does not do</strong><ul>
+    <li>The lock and limiter panels above are models, not Redis. Only the failover transcript and the tests list come from the repo itself.</li>
+    <li>The author's README states Redis experience came from running AI infrastructure, not clustering. This lab is where the hands-on failover work happened.</li>
+    <li>Nothing here is deployed on AWS ElastiCache. <code>infra/elasticache.tf</code> is a reference, never applied.</li>
+    <li>A single-instance lock is not a safe lock under every failure. That is the reason for the fencing token.</li>
+  </ul></div>
+</div></section>
+
+
+<footer><div class="wrap">
+  <span>redis-ops-lab. Built by <a href="https://github.com/gerardrecinto">Gerard Recinto</a>.</span>
+  <span><a href="https://github.com/gerardrecinto/redis-ops-lab">Source</a> &middot; <a href="https://github.com/gerardrecinto/redis-ops-lab/releases">Releases</a></span>
+</div></footer>
+
+<script>
+
+(() => {
+
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s == null ? "" : s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  const track = (n) => { try { if (window.plausible) window.plausible(n); } catch (e) {} };
+
+  function renderTests(el, countEl, tests) {
+    if (countEl) countEl.textContent = tests.length;
+    const by = {}; tests.forEach((t) => (by[t.file] = by[t.file] || []).push(t));
+    el.innerHTML = Object.entries(by).map(([f, ts]) => `<div><b>${esc(f)} (${ts.length})</b>${ts.map((t) => `<span>${esc(t.name.replace(/^test_/, "").replace(/_/g, " "))}</span><br>`).join("")}</div>`).join("");
+  }
+
+  function lockTimeline() {
+    const ttl = Math.max(1, +$("ttl").value || 1), pause = Math.max(0, +$("pause").value || 0), fence = $("fence").checked;
+    const L = [];
+    let key = null, expires = 0, counter = 0, value = null, highest = 0;
+    const fw = (who, n, v) => { if (fence && n <= highest) return false; highest = n; value = v; return true; };
+    counter++; const fa = counter; key = "A"; expires = ttl;
+    L.push(`<span class="dim">t=0</span>      A acquires the lock, fencing number ${fa}`);
+    L.push(`<span class="dim">t=0</span>      A stalls for ${pause} ms (GC pause, slow network, CPU starvation)`);
+    const bT = ttl + 10;
+    if (pause < ttl) {
+      L.push(`<span class="dim">t=${pause}</span>  A resumes inside its TTL and writes "A" ${fw("A", fa, "A") ? '<span class="ok">applied</span>' : '<span class="bad">rejected</span>'}`);
+      L.push(`<span class="dim">t=${bT}</span>  B tries to acquire: the lock has expired now, so B gets fencing number 2 and writes "B"`);
+      counter++; fw("B", counter, "B");
+    } else {
+      L.push(`<span class="dim">t=${ttl}</span>   the lock key expires. Nobody told A.`);
+      counter++; const fb = counter;
+      L.push(`<span class="dim">t=${bT}</span>  B acquires the lock, fencing number ${fb}, and writes "B" ${fw("B", fb, "B") ? '<span class="ok">applied</span>' : '<span class="bad">rejected</span>'}`);
+      const tA = Math.max(pause, bT + 1);
+      const ok = fw("A", fa, "A");
+      L.push(`<span class="dim">t=${tA}</span>  A wakes up, still believes it holds the lock, writes "A" ${ok ? '<span class="bad">APPLIED, B\'s write is overwritten</span>' : '<span class="ok">REJECTED: fencing number ' + fa + ' is not above ' + highest + '</span>'}`);
+    }
+    L.push("");
+    L.push(`final value in the resource: <span class="hl">${value}</span>` + (!fence && pause >= ttl ? '  <span class="bad">(silent data loss, no error anywhere)</span>' : ""));
+    $("lock").innerHTML = L.join("\n");
+  }
+  ["ttl", "pause", "fence"].forEach((id) => $(id).addEventListener("input", () => { lockTimeline(); track("rd_lock"); }));
+
+  let now = 0, zset = [];
+  function rl(msg) {
+    const lim = +$("lim").value || 1, win = +$("win").value || 1;
+    const lines = [];
+    if (msg === "req") {
+      zset = zset.filter((t) => t > now - win);
+      if (zset.length < lim) { zset.push(now); lines.push(`<span class="ok">ALLOWED</span>  request at t=${now}s`); } else lines.push(`<span class="bad">REJECTED</span> request at t=${now}s: ${zset.length} already in the last ${win}s`);
+    } else if (msg === "tick") { now += 3; zset = zset.filter((t) => t > now - win); lines.push(`clock advanced to t=${now}s`); }
+    else if (msg === "rst") { now = 0; zset = []; }
+    const hist = ($("rl").dataset.h ? JSON.parse($("rl").dataset.h) : []);
+    if (msg === "rst") hist.length = 0; lines.forEach((l) => hist.push(l)); if (hist.length > 9) hist.splice(0, hist.length - 9);
+    $("rl").dataset.h = JSON.stringify(hist);
+    $("rl").innerHTML = `window holds <span class="hl">${zset.length}</span> of ${lim} (entries at t=${zset.join(", ") || "none"})\n\n` + hist.join("\n");
+  }
+  $("req").addEventListener("click", () => { rl("req"); track("rd_limit"); }); $("tick").addEventListener("click", () => rl("tick")); $("rst").addEventListener("click", () => rl("rst"));
+  ["lim", "win"].forEach((id) => $(id).addEventListener("input", () => rl("")));
+
+  const FO = [
+    ["== before failover ==\nSentinel-discovered primary: redis-primary:6379\nwrite+read through primary: before-failover", "Healthy start. The client asks Sentinel who the primary is and writes through it."],
+    ["== stopping redis-ops-lab-redis-primary-1 ==", "The script stops the primary container for real."],
+    ["== waiting for Sentinel to detect the failure and promote a replica ==\nSentinel promoted a new primary: 172.24.0.4:6379 (was redis-primary:6379)", "Sentinels agree (quorum 2) and promote a replica. The new primary shows as an IP, not a hostname. The README notes this and says it does not break anything."],
+    ["== writing through Sentinel discovery against the NEW primary ==\nwrite succeeded after failover, read back: after-failover", "The same client code finds the new primary and the write succeeds."],
+    ["== restarting redis-ops-lab-redis-primary-1 (rejoins as a replica automatically) ==\nSentinel-discovered primary after old node rejoins: 172.24.0.4:6379", "The old primary comes back as a replica. The promoted node stays primary."],
+  ];
+  let fi = 0;
+  function fo() { $("fo").textContent = FO.slice(0, fi + 1).map((x) => x[0]).join("\n\n"); $("fcap").textContent = "Step " + (fi + 1) + " of " + FO.length + ". " + FO[fi][1]; $("fprev").disabled = fi === 0; $("fnext").disabled = fi === FO.length - 1; }
+  $("fnext").addEventListener("click", () => { fi = Math.min(FO.length - 1, fi + 1); fo(); track("rd_fo"); }); $("fprev").addEventListener("click", () => { fi = Math.max(0, fi - 1); fo(); });
+  $("fall").addEventListener("click", () => { fi = FO.length - 1; fo(); });
+
+  lockTimeline(); rl(""); fo(); window.__RD_READY__ = true;
+  fetch("tests.json").then((r) => r.json()).then((t) => renderTests($("tcat"), $("tcount"), t)).catch(() => { $("tcat").innerHTML = "<div>The test list did not load.</div>"; });
+})();
+
+</script>
+</body>
+</html>

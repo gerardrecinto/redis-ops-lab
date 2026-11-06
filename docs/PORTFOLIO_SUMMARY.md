@@ -10,7 +10,7 @@ including two real Docker-networking gotchas hit and fixed while building
 it, and a real reproduction of the distributed-lock race that fencing
 tokens exist to prevent.
 
-## Resume bullets (accurate language only)
+## What was built
 
 - Built and operated a local Redis primary/2-replica/3-Sentinel
   deployment with password authentication and AOF persistence; verified
@@ -30,7 +30,7 @@ tokens exist to prevent.
 ElastiCache resources were provisioned; `infra/elasticache.tf` is
 reference IaC only, stated directly in `docs/REDIS_TIERS.md`.
 
-## Interview talking points
+## Design notes
 
 **"Walk me through a real problem you hit building this."**
 Two, both real. First: Sentinel couldn't resolve `redis-primary`'s
